@@ -1,0 +1,147 @@
+---
+title: "Excercise correctness prediction"
+author: "Dmitry B"
+date: '5 April 2019'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 6, digits = 3)
+
+library(caret)
+library(dplyr)
+```
+
+## Synopsis
+
+This project shows that data from several accelerometer devices can be used to determine if a person performs weight lifting exercise correctly or makes one of the common mistakes. (More information about the problem is available from [the website here](http://groupware.les.inf.puc-rio.br/har)). The goal of this analysis is to find and evaluate the appropriate prediction model.
+
+## Data load
+
+Let's load data taking into account the presence of "#DIV/0!" values.
+
+```{r load_data}
+raw.data <- read.csv("data/pml-training.csv", na.strings=c("NA","","#DIV/0!"))
+
+dim(raw.data)
+```
+
+## Data partition
+
+As the data set has nearly 20 thousand records, we can apply the split proportion recommended for large enough data sets, i.e. 60-20-20 % for training, testing and validation partitions respectively. At this step we separate the 20% of validation data against which the prediction will be run only one time in order to get the trustworthy out-of-sample error estimate.
+
+```{r split_data}
+set.seed(123)
+in_train <- createDataPartition(raw.data$classe, p = .8)[[1]]
+train.data <- raw.data[in_train,]; val.data <- raw.data[-in_train,]
+
+```
+
+## Data preparation
+
+Our prediction model should depend only on monitoring device signals, so we exclude all features related to the subject, timing or sequence of observations.
+
+```{r drop_irr}
+
+drop_irrelevant <- function(df) {
+  irr_vars <- c("X", "user_name", "new_window", "num_window",
+                "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp")
+  df %>% select(-irr_vars)
+}
+
+train.data <- drop_irrelevant(train.data)
+
+```
+
+Let's also check missing values by plotting the fraction of NAs in each variable.
+
+```{r test_nas, fig.width=4, fig.height=2}
+
+na_fraction <- colSums(is.na(train.data))/nrow(train.data)
+qplot(1:length(na_fraction), na_fraction, xlab="variable num", color=na_fraction<0.95)
+
+```
+
+There is a large set of variables that are almost always NA. Let's exclude them from the analysis.
+
+```{r fix_nas}
+
+lots_of_nas <- names(train.data)[na_fraction > 0.95]
+drop_empty <- function (df) { df %>% select(-lots_of_nas) }
+train.data <- drop_empty(train.data)
+
+```
+
+```{r check}
+sum(!complete.cases(train.data))
+table(sapply(train.data, class))
+
+```
+
+So we have one factor outcome variable and 52 numeric predictors left.
+
+## Modeling
+
+There are several possible solutions to the classification problem class, including Classification Trees, Random Forests, Gradient Boosting Machine, and Naive Bayes. In our case we exclude NB as its assumption of predictor independance would not hold for multiple sensor predictors. Also we prefer GBM and RF over classification tree as more advanced, better performing and less sensitive to overfitting algorithms.
+
+We'll apply the 4-fold repeated cross validation resampling to support our 60-20-20 % data partitioning strategy, described earlier. Repeating the resampling twice will give us better estimates for out-of-sample error.
+
+```{r modeling}
+
+train_ctrl <- trainControl(method = "repeatedcv", number = 4, repeats = 2)
+
+m_rf <- train(classe ~ ., method="rf", data=train.data, trControl = train_ctrl)
+m_gbm <- train(classe ~ ., method="gbm", data=train.data, trControl = train_ctrl, verbose=F)
+
+```
+
+Now we can compare the in-sample algorithm accuracy and estimate the out-of-sample error.
+
+```{r in_sample_error}
+
+m_rf_res <- m_rf$results[m_rf$results$mtry == m_rf$bestTune$mtry,]
+m_gbm_res <- m_gbm$results[which.max(m_gbm$results$Accuracy), ]
+
+res <- rbind(m_rf_res$Accuracy + qt(.975, df=7)*c(-1,0,1)*m_rf_res$AccuracySD,
+             m_gbm_res$Accuracy + qt(.975, df=7)*c(-1,0,1)*m_gbm_res$AccuracySD)
+
+rownames(res) <- c("RF", "GBM")
+colnames(res) <- c("Lower CI", "Accuracy", "Higher CI")
+
+res
+
+```
+
+The Random Forest algorighm shows better results with the accuracy of `r round(res[1,2]*100, 1)`% and the expected out-of-sample accuracy between `r round(res[1,1]*100, 1)`% and `r round(res[1,3]*100, 1)`% (95% confidence level). Let's check the actual out-of-sample errors against the validation partition.
+
+```{r try_predict}
+
+p_rf <- predict(m_rf, val.data)
+p_gbm <- predict(m_gbm, val.data)
+
+acc <- function(p) { sum(p == val.data$classe) / length(p) }
+
+c(rf = acc(p_rf), gbm = acc(p_gbm))
+
+```
+
+The out-of-sample accuracy scores are within the estimated boundaries and confirm higher efficiency of the Random Forest algorithm for our problem.
+
+## Conclusion
+
+It has been shown that data from a set of wearable monitoring devices can be used to evaluate the correctness of performing a weight lifting exercise with very low error rate (less than 1%). Among the several possible prediction models, Random Forest showed the best results with regard to the prediction accuracy.
+
+## Appendix
+
+### References
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human ’13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+### Predicting the coursera quiz test cases
+
+```{r }
+
+read.csv("data/pml-testing.csv") %>% predict(m_rf, .)
+
+```
